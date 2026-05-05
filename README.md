@@ -19,3 +19,11 @@ Run `RUN_PRESERVATION_PROJECT.bat`.
 - Runtime logs are written to `logs`.
 - Ports `80`, `443`, `42230`, `44325`, and `50051` must be available.
 - Binding to ports `80` and `443` may require administrator permissions.
+
+## Custom Parks
+
+Custom park files go in `custom_parks`.
+
+The filename is the code you enter in-game. For example, the included `custom_parks/parklol` file uses code `parklol`.
+
+Supported filename styles include no extension, `.txt`, `.json`, `.dmop`, and `.park`.

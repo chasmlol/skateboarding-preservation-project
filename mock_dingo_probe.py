@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import unquote
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +33,13 @@ HOST = "127.0.0.1"
 PORT = 50051
 TLS_CERT = ROOT / "local_gos_server_chain.pem"
 TLS_KEY = ROOT / "local_gos_server_key.pem"
+PARK_SOURCE_PATH = ROOT / os.environ.get("SKATE_PARK_SOURCE", "dmop/Hideout.txt")
+PARK_UPLOAD_ID = os.environ.get("SKATE_PARK_UPLOAD_ID", "local-hideout")
+PARK_URI_CODE = os.environ.get("SKATE_PARK_URI_CODE", "hideout")
+PARK_CONTENT_NAME = os.environ.get("SKATE_PARK_CONTENT_NAME", "Hideout")
+PARK_CONTENT_TYPE = os.environ.get("SKATE_PARK_CONTENT_TYPE", "application/x-dingo-park")
+CUSTOM_PARKS_DIR = ROOT / os.environ.get("SKATE_CUSTOM_PARKS_DIR", "custom_parks")
+CUSTOM_PARK_EXTENSIONS = {".txt", ".json", ".dmop", ".park", ""}
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", ""))
 REFERENCE_CACHE_ROOT = Path(
     os.environ.get("SKATE_REFERENCE_CACHE_ROOT", str(ROOT / "reference_cache" / "http" / "0"))
@@ -3406,6 +3414,204 @@ def get_data_chunks_response(request_body=b"", logger=None, stream_id=None, path
     return response
 
 
+def normalize_park_code(value):
+    return str(value or "").strip().lower()
+
+
+def park_upload_id_for_code(code):
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", normalize_park_code(code)).strip("-")
+    return "local-park-" + (safe or "park")
+
+
+def custom_park_records():
+    records = {}
+    try:
+        files = sorted(CUSTOM_PARKS_DIR.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return records
+    for path in files:
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        if path.suffix.lower() not in CUSTOM_PARK_EXTENSIONS:
+            continue
+        code = normalize_park_code(path.stem if path.suffix else path.name)
+        if not code or code in records:
+            continue
+        records[code] = {
+            "code": code,
+            "upload_id": park_upload_id_for_code(code),
+            "content_name": path.stem if path.suffix else path.name,
+            "path": path,
+        }
+    return records
+
+
+def legacy_park_record():
+    code = normalize_park_code(PARK_URI_CODE)
+    if not code or not park_source_available(PARK_SOURCE_PATH):
+        return None
+    return {
+        "code": code,
+        "upload_id": PARK_UPLOAD_ID,
+        "content_name": PARK_CONTENT_NAME,
+        "path": PARK_SOURCE_PATH,
+    }
+
+
+def all_park_records():
+    records = custom_park_records()
+    legacy = legacy_park_record()
+    if legacy and legacy["code"] not in records:
+        records[legacy["code"]] = legacy
+    return records
+
+
+def park_record_for_code(code):
+    return all_park_records().get(normalize_park_code(code))
+
+
+def park_record_for_upload_id(upload_id):
+    wanted = str(upload_id or "")
+    for record in all_park_records().values():
+        if record["upload_id"] == wanted:
+            return record
+    return None
+
+
+def park_source_available(path=PARK_SOURCE_PATH):
+    try:
+        return path.exists() and path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def park_source_url(record):
+    endpoint = f"http://{HOST}:{PORT}" if PORT != 80 else f"http://{HOST}"
+    return endpoint + "/local-parks/" + record["upload_id"]
+
+
+def park_storage_uri(record):
+    if normalize_park_code(record["code"]) == normalize_park_code(PARK_URI_CODE) and os.environ.get("SKATE_PARK_URI"):
+        return os.environ["SKATE_PARK_URI"]
+    return "skate://storage?storageId=" + record["upload_id"]
+
+
+def park_source_stat(path):
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0, ""
+    return len(data), hashlib.md5(data).hexdigest()
+
+
+def storage_file_ref(record):
+    # dingo.services.storage.common.v1.FileRef, inferred from current-build
+    # to-string order: url, md5Hash, contentType, contentLength, clientSignature.
+    size, md5_hash = park_source_stat(record["path"])
+    return (
+        pb_string(1, park_source_url(record))
+        + pb_string(2, md5_hash)
+        + pb_string(3, PARK_CONTENT_TYPE)
+        + pb_varint(4, size)
+        + pb_string(5, md5_hash)
+    )
+
+
+def storage_upload(record):
+    # dingo.services.storage.common.v1.UploadData, confirmed from current-build
+    # serializer/parser: uploadId=1, ownerId=2, createdTime=3, updatedTime=4,
+    # labels=9, isPublic=10, source=15, contentName=16, uriCode=17.
+    now = int(time.time())
+    return (
+        pb_string(1, record["upload_id"])
+        + pb_string(2, "profile8")
+        + pb_varint(3, now)
+        + pb_varint(4, now)
+        + pb_varint(10, 1)
+        + pb_message(15, storage_file_ref(record))
+        + pb_string(16, record["content_name"])
+        + pb_string(17, record["code"])
+    )
+
+
+def storage_uploads_response(request_body=b"", logger=None, stream_id=None, path=None):
+    records = all_park_records()
+    upload_ids = protobuf_repeated_strings(grpc_request_payload(request_body), 1)
+    selected = []
+    if upload_ids:
+        for upload_id in upload_ids:
+            record = park_record_for_upload_id(upload_id)
+            if record:
+                selected.append(record)
+    else:
+        selected = list(records.values())
+    payload = b""
+    response_shape = "none"
+    if selected:
+        if path and "Storage/getUploads" in path:
+            # GetUploadsResponse contains repeated GetUploadResponseEntry.
+            # Ghidra parse evidence: response field 1 is totalCount and
+            # response field 2 is entries. Entry to-string order is success,
+            # upload, reason, so upload is field 2.
+            payload = pb_varint(1, len(selected))
+            for record in selected:
+                entry = pb_varint(1, 1) + pb_message(2, storage_upload(record))
+                payload += pb_message(2, entry)
+            response_shape = "get_uploads_entry_wrapped"
+        else:
+            payload = b"".join(pb_message(1, storage_upload(record)) for record in selected)
+            response_shape = "list_uploads_raw_upload"
+    if logger:
+        first = selected[0] if selected else None
+        size, md5_hash = park_source_stat(first["path"]) if first else (0, "")
+        logger.write(
+            "storage_uploads_response",
+            stream=stream_id,
+            path=path,
+            include=bool(selected),
+            requested=list(upload_ids),
+            park_count=len(records),
+            selected_count=len(selected),
+            upload_id=first["upload_id"] if first else "",
+            content_name=first["content_name"] if first else "",
+            uri_code=first["code"] if first else "",
+            source=str(first["path"]) if first else "",
+            source_size=size,
+            source_md5=md5_hash,
+            source_content_type=PARK_CONTENT_TYPE if first else "",
+            selected_codes=[record["code"] for record in selected[:12]],
+            payload_len=len(payload),
+            response_shape=response_shape,
+        )
+    return payload
+
+
+def uri_code_response(request_body=b"", logger=None, stream_id=None, path=None):
+    fields = grpc_string_fields(request_body)
+    code = protobuf_first_string(fields, 1, "")
+    record = park_record_for_code(code)
+    uri = park_storage_uri(record) if record else ""
+    # UriCodeResponse has one visible string field: uri. UriCodeRequest is the
+    # matching one-string code message, so do not echo code back here.
+    payload = pb_string(1, uri) if uri else b""
+    if logger:
+        logger.write(
+            "uri_code_response",
+            stream=stream_id,
+            path=path,
+            code=code,
+            uri=uri,
+            source_available=bool(record),
+            source=str(record["path"]) if record else "",
+            upload_id=record["upload_id"] if record else "",
+            payload_len=len(payload),
+        )
+    return payload
+
+
 def grpc_payload_for(path, request_body=b"", logger=None, stream_id=None):
     if "ServerDiscovery/getServers" in path:
         return None
@@ -3454,6 +3660,10 @@ def grpc_payload_for(path, request_body=b"", logger=None, stream_id=None):
         return progression_rpc_payload_for(path, request_body, logger=logger, stream_id=stream_id)
     if "Unlocks/getUnlocks" in path:
         return unlocks_response(logger=logger, stream_id=stream_id, path=path)
+    if "Storage/listUploads" in path or "Storage/getUploads" in path:
+        return storage_uploads_response(request_body, logger=logger, stream_id=stream_id, path=path)
+    if "GameUriCode/getUri" in path:
+        return uri_code_response(request_body, logger=logger, stream_id=stream_id, path=path)
     if "Stats/" in path or "Mail/" in path:
         return b""
     if logger and not (
@@ -3720,6 +3930,23 @@ def handle_http1(conn, peer, logger, first):
         elif lowered_path.startswith("/application_id/dingo_pc_client"):
             body = local_dingo_settings_config()
             content_type = "application/octet-stream"
+        elif lowered_path.startswith("/local-parks/"):
+            upload_id = unquote(path.split("?", 1)[0].rsplit("/", 1)[-1])
+            record = park_record_for_upload_id(upload_id)
+            if record and park_source_available(record["path"]):
+                body = record["path"].read_bytes()
+                content_type = "application/octet-stream"
+                logger.write(
+                    "http1_park_hit",
+                    path=path,
+                    code=record["code"],
+                    upload_id=record["upload_id"],
+                    source=str(record["path"]),
+                    body_len=len(body),
+                )
+            else:
+                body = b""
+                content_type = "application/octet-stream"
         elif (
             "director" in lowered_path
             or "config" in lowered_path
