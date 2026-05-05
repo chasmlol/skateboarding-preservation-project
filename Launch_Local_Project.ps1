@@ -139,6 +139,20 @@ function Write-ExecutableDiagnostics {
     }
 }
 
+function Get-ClientCommandLine {
+    param(
+        [int]$ProcessId
+    )
+
+    try {
+        $ProcessInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        return $ProcessInfo.CommandLine
+    }
+    catch {
+        return ""
+    }
+}
+
 function Get-RunLogText {
     param(
         [string]$Stamp
@@ -189,21 +203,40 @@ function Get-RunSummary {
         return "no log lines yet"
     }
 
-    $GameData = Count-Text $Text "/amp.services.data.game.v1.GameData/getData"
-    $Inventory = Count-Text $Text "/amp.services.inventory.Inventory/getAllInventoryItems"
-    $Ownables = Count-Text $Text "/dingo.services.ownable.game.v1.Ownable/getOwnableInstances"
-    $LevelRewards = Count-Text $Text "/amp.services.level_rewards.v1.game.LevelRewards/getUserLevels"
-    $SaveLoad = Count-Text $Text "/dingo.services.save.game.v1.Save/load"
+    $Discovery = Count-Text $Text '"event": "server_discovery_response"'
+    $Login = Count-Text $Text '"event": "login_response"'
+    $GameData = Count-Text $Text '"event": "game_data_response"'
+    $GameDataChunks = Count-Text $Text '"event": "game_data_chunks_response"'
+    $Profile = Count-Text $Text '"event": "profile_response"'
+    $ProgressionGet = Count-Text $Text '"event": "progression_get"'
+    $ProgressionSend = Count-Text $Text '"event": "progression_send"'
+    $Inventory = Count-Text $Text '"event": "inventory_response"'
+    $Ownables = Count-Text $Text '"event": "ownables_response"'
+    $LevelRewards = Count-Text $Text '"event": "level_rewards_response"'
+    $SaveLoad = Count-Text $Text '"event": "save_load"'
     $ProfileSave = Count-Text $Text '"key": "Profile"'
     $CustomizationSave = Count-Text $Text '"key": "Customization"'
-    $DataChunks = (Count-Text $Text "/amp.services.data.game.v1.GameData/getDataChunks") + (Count-Text $Text "/amp.services.data.game.v1.GameData/getDataChunk")
+    $Checkpoints = Count-Text $Text '"event": "bootstrap_checkpoint"'
 
     $Level = Get-FirstRegexGroup $Text '"event": "level_rewards_response".*?"level": ([0-9.]+)'
     $InventoryCount = Get-FirstRegexGroup $Text '"event": "inventory_response".*?"count": ([0-9]+)'
     $OwnableCount = Get-FirstRegexGroup $Text '"event": "ownables_response".*?"count": ([0-9]+)'
     $ActiveUnlocks = Get-FirstRegexGroup $Text '"customization_active_unlock_count": ([0-9]+)'
+    $ProgressionReturned = Get-FirstRegexGroup $Text '"event": "progression_get".*?"returned": ([0-9]+)'
+    $ProfileLevel = Get-FirstRegexGroup $Text '"event": "profile_response".*?"level": ([0-9.]+)'
 
-    return "GameData=$GameData Inventory=$Inventory(count=$InventoryCount) Ownables=$Ownables(count=$OwnableCount) LevelRewards=$LevelRewards(level=$Level) SaveLoad=$SaveLoad Profile=$ProfileSave Customization=$CustomizationSave(active=$ActiveUnlocks) DataChunks=$DataChunks"
+    $Missing = @()
+    if ($Discovery -eq 0) { $Missing += "Discovery" }
+    if ($Login -eq 0) { $Missing += "Login" }
+    if ($GameData -eq 0) { $Missing += "GameData" }
+    if ($Profile -eq 0) { $Missing += "Profile" }
+    if ($Inventory -eq 0) { $Missing += "Inventory" }
+    if ($Ownables -eq 0) { $Missing += "Ownables" }
+    if ($LevelRewards -eq 0) { $Missing += "LevelRewards" }
+    if ($SaveLoad -eq 0) { $Missing += "SaveLoad" }
+    $MissingText = if ($Missing.Count) { $Missing -join "," } else { "none" }
+
+    return "Discovery=$Discovery Login=$Login GameData=$GameData Chunks=$GameDataChunks Profile=$Profile(profileLevel=$ProfileLevel) ProgressionGet=$ProgressionGet(firstReturned=$ProgressionReturned) ProgressionSend=$ProgressionSend Inventory=$Inventory(count=$InventoryCount) Ownables=$Ownables(count=$OwnableCount) LevelRewards=$LevelRewards(level=$Level) SaveLoad=$SaveLoad ProfileSave=$ProfileSave CustomizationSave=$CustomizationSave(active=$ActiveUnlocks) Checkpoints=$Checkpoints Missing=$MissingText"
 }
 
 function Write-CurrentRunLogList {
@@ -323,8 +356,18 @@ try {
     $ClientStartedAt = Get-Date
     $ClientStdout = Join-Path $LogDir "client_$Stamp.stdout.log"
     $ClientStderr = Join-Path $LogDir "client_$Stamp.stderr.log"
-    $Client = Start-Process -FilePath $ClientExe -ArgumentList @("-DingoOnline.ClientAutoLoginEnabled", "true") -WorkingDirectory $Root -PassThru -RedirectStandardOutput $ClientStdout -RedirectStandardError $ClientStderr
+    $ClientArgs = @("-DingoOnline.ClientAutoLoginEnabled", "true")
+    Write-Diag "Client launch args: $($ClientArgs -join ' ')"
+    $Client = Start-Process -FilePath $ClientExe -ArgumentList $ClientArgs -WorkingDirectory $Root -PassThru -RedirectStandardOutput $ClientStdout -RedirectStandardError $ClientStderr
     Write-Diag "Client process id: $($Client.Id)"
+    Start-Sleep -Milliseconds 500
+    $ClientCommandLine = Get-ClientCommandLine $Client.Id
+    if ($ClientCommandLine) {
+        Write-Diag "Client command line: $ClientCommandLine"
+    }
+    else {
+        Write-Diag "Client command line: unavailable"
+    }
     Write-Diag "Live backend summary will update every 5 seconds."
 
     $LastSummary = ""
@@ -341,6 +384,18 @@ try {
     $FinalSummary = Get-RunSummary $Stamp
     Write-Diag "Final backend summary: $FinalSummary"
     Write-CurrentRunLogList $Stamp
+
+    $BundlePath = Join-Path $LogDir "diagnostics_$Stamp.zip"
+    try {
+        $BundleFiles = @(Get-ChildItem -LiteralPath $LogDir -Filter "*_$Stamp.*" -File -ErrorAction SilentlyContinue)
+        if ($BundleFiles.Count -gt 0) {
+            Compress-Archive -LiteralPath ($BundleFiles | ForEach-Object { $_.FullName }) -DestinationPath $BundlePath -Force
+            Write-Diag "Diagnostics bundle: $BundlePath"
+        }
+    }
+    catch {
+        Write-Diag "Diagnostics bundle could not be created: $($_.Exception.Message)"
+    }
 
     if (($Client.ExitCode -ne 0) -or ($ClientRuntime -lt 10)) {
         Write-Host "Preservation client exited with code $($Client.ExitCode) after $([Math]::Round($ClientRuntime, 1)) seconds."

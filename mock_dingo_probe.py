@@ -2071,6 +2071,21 @@ def login_response():
     )
 
 
+def login_response_with_logging(logger=None, stream_id=None, path=None):
+    payload = login_response()
+    if logger:
+        logger.write(
+            "login_response",
+            stream=stream_id,
+            path=path,
+            eId="profile8",
+            username="Local Skater",
+            payload_len=len(payload),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="login_response")
+    return payload
+
+
 def profile_user(e_id, title_id="profile8"):
     # GetProfilesResponse.users[]:
     #   1=eId, 2=name, 3=level, 4=titleId, 5=storage metadata, 6=followers.
@@ -2085,14 +2100,128 @@ def profile_user(e_id, title_id="profile8"):
     )
 
 
-def profile_response():
+def profile_response(logger=None, stream_id=None, path=None, request_body=b""):
     # The client can ask for either the login eId or the cached loadout id.
     # Returning both keeps profile lookup and loadout lookup consistent.
     users = [
         profile_user("profile8", "profile8"),
         profile_user("local-user", "profile8"),
     ]
-    return b"".join(pb_message(1, user) for user in users)
+    payload = b"".join(pb_message(1, user) for user in users)
+    if logger:
+        requested = protobuf_repeated_strings(grpc_request_payload(request_body), 1)
+        logger.write(
+            "profile_response",
+            stream=stream_id,
+            path=path,
+            requested=requested,
+            returned=["profile8", "local-user"],
+            level=rep_level_value(),
+            payload_len=len(payload),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="profile_response")
+    return payload
+
+
+def log_bootstrap_request(logger, stream_id, path, request_body, headers):
+    if not logger:
+        return
+    payload = grpc_request_payload(request_body)
+    if "ServerDiscovery/getServers" in path:
+        logger.write(
+            "server_discovery_request",
+            stream=stream_id,
+            path=path,
+            authority=headers.get(":authority", ""),
+            scheme=headers.get(":scheme", ""),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="server_discovery_request")
+        return
+    if "Login/" in path:
+        logger.write(
+            "login_request",
+            stream=stream_id,
+            path=path,
+            strings=printable_strings(payload, limit=40),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="login_request")
+        return
+    if "GameData/getDataChunks" in path or "GameData/getDataChunk" in path:
+        requested = requested_game_data_chunk_ids(request_body)
+        logger.write(
+            "game_data_chunks_request",
+            stream=stream_id,
+            path=path,
+            requested=list(requested),
+            requested_count=len(requested),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="game_data_chunks_request")
+        return
+    if "GameData/getData" in path:
+        logger.write(
+            "game_data_request",
+            stream=stream_id,
+            path=path,
+            strings=printable_strings(payload, limit=40),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="game_data_request")
+        return
+    if "Profile/getProfiles" in path or "Profile/getCompactProfiles" in path:
+        logger.write(
+            "profile_request",
+            stream=stream_id,
+            path=path,
+            requested=protobuf_repeated_strings(payload, 1),
+            strings=printable_strings(payload, limit=40),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="profile_request")
+        return
+    if "Progression/getGameEvent" in path or "Progression/getGameEvents" in path:
+        events = progression_request_events(request_body)
+        logger.write(
+            "progression_get_request",
+            stream=stream_id,
+            path=path,
+            requested_count=len(events),
+            requested=[{"event": event_name, "component": component_id} for event_name, component_id in events[:40]],
+            body_len=len(request_body),
+        )
+        return
+    if "Inventory/getAllInventoryItems" in path:
+        logger.write("inventory_request", stream=stream_id, path=path, body_len=len(request_body))
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="inventory_request")
+        return
+    if "Ownable/getOwnableInstances" in path:
+        logger.write("ownables_request", stream=stream_id, path=path, body_len=len(request_body))
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="ownables_request")
+        return
+    if "LevelRewards/getUserLevels" in path:
+        logger.write("level_rewards_request", stream=stream_id, path=path, body_len=len(request_body))
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="level_rewards_request")
+        return
+    if "Save/load" in path or "Save/loadUser" in path or "Save/save" in path:
+        fields = protobuf_string_fields(payload)
+        if "Save/loadUser" in path:
+            e_id = protobuf_first_string(fields, 1)
+            key = protobuf_first_string(fields, 2)
+        else:
+            e_id = ""
+            key = protobuf_first_string(fields, 1)
+        logger.write(
+            "save_request",
+            stream=stream_id,
+            path=path,
+            key=key,
+            eId=e_id,
+            strings=printable_strings(payload, limit=40),
+            body_len=len(request_body),
+        )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="save_request")
 
 
 def storage_common_value(url, body, content_type):
@@ -3040,6 +3169,13 @@ def progression_rpc_payload_for(path, request_body=b"", logger=None, stream_id=N
                 path=path,
                 count=len(events),
                 returned=len(returned_events),
+                requested=[
+                    {
+                        "event": event_name,
+                        "component": component_id,
+                    }
+                    for event_name, component_id in events[:40]
+                ],
                 events=[
                     {
                         "event": event_name,
@@ -3098,12 +3234,17 @@ def get_game_data_response(logger=None, stream_id=None, path=None):
     chunk_count = 0
     asset_count = 0
     sample_assets = []
+    sample_chunks = []
+    all_chunk_ids = []
     system_counts = {}
     for chunk_id, chunk_source in board_data_chunks_for_response():
         try:
             body = chunk_body_bytes(chunk_source)
         except OSError:
             continue
+        all_chunk_ids.append(chunk_id)
+        if len(sample_chunks) < 16:
+            sample_chunks.append(chunk_id)
         system, _, record_asset_ids = chunk_manifest_type(body, chunk_id=chunk_id)
         system_counts[system] = system_counts.get(system, 0) + 1
         manifest_asset_ids = manifest_asset_ids_for_chunk(system, body, record_asset_ids, chunk_id=chunk_id)
@@ -3143,8 +3284,15 @@ def get_game_data_response(logger=None, stream_id=None, path=None):
             system_counts=system_counts,
             asset_count=asset_count,
             sample_assets=sample_assets,
+            sample_chunks=sample_chunks,
+            customization_chunk_present=CUSTOMIZATION_INVENTORY_STATIC_CHUNK_ID in all_chunk_ids,
+            customization_chunk_id=CUSTOMIZATION_INVENTORY_STATIC_CHUNK_ID,
+            manifest_ownable_asset_chunk_id=os.environ.get("SKATE_MANIFEST_OWNABLE_ASSET_CHUNK_ID", ""),
+            cosmetic_mode=os.environ.get("SKATE_COSMETIC_MODE", ""),
+            cosmetic_max_count=env_int("SKATE_COSMETIC_MAX_COUNT", 0),
             payload_len=len(payload),
         )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="game_data_response")
     return bytes(payload)
 
 
@@ -3204,11 +3352,14 @@ def get_data_chunks_response(request_body=b"", logger=None, stream_id=None, path
             path=path,
             mode=mode,
             requested=list(requested),
+            requested_count=len(requested),
             count=len(chunks),
             payload_len=len(response),
             sample=[chunk_id for chunk_id, _ in chunks[:8]],
             record_samples=record_samples,
+            customization_chunk_returned=any(chunk_id == CUSTOMIZATION_INVENTORY_STATIC_CHUNK_ID for chunk_id, _ in chunks),
         )
+        logger.write("bootstrap_checkpoint", stream=stream_id, path=path, checkpoint="game_data_chunks_response")
     return response
 
 
@@ -3224,7 +3375,7 @@ def grpc_payload_for(path, request_body=b"", logger=None, stream_id=None):
             or "Login/autoLogin" in path
             or "Login/reconnect" in path
         ):
-            return login_response()
+            return login_response_with_logging(logger=logger, stream_id=stream_id, path=path)
         return b""
     if "Inventory/getAllInventoryItems" in path:
         return inventory_items_response(logger=logger, stream_id=stream_id, path=path)
@@ -3239,7 +3390,7 @@ def grpc_payload_for(path, request_body=b"", logger=None, stream_id=None):
     if "amp.services.gamestore.v1." in path or "GameStore/" in path:
         return b""
     if "Profile/getProfiles" in path or "Profile/getCompactProfiles" in path:
-        return profile_response()
+        return profile_response(logger=logger, stream_id=stream_id, path=path, request_body=request_body)
     if "Ownable/getOwnableInstances" in path:
         return ownables_response(logger=logger, stream_id=stream_id, path=path)
     if "LevelRewards/getUserLevels" in path:
@@ -3440,6 +3591,7 @@ def handle_conn(conn, addr, config, logger, address, names, tls_context=None):
                     else:
                         body_log_len = 64
                     logger.write("end", stream=event.stream_id, path=path, body_len=len(body), body_hex=body[:body_log_len].hex())
+                    log_bootstrap_request(logger, event.stream_id, path, body, stream["headers"])
                     if "sendClientBiEvents" in path or "logMetricsV2" in path:
                         logger.write(
                             "request_strings",
@@ -3451,6 +3603,16 @@ def handle_conn(conn, addr, config, logger, address, names, tls_context=None):
                     payload = grpc_payload_for(path, body, logger=logger, stream_id=event.stream_id)
                     if payload is None:
                         payload = get_servers_response(address, names)
+                        logger.write(
+                            "server_discovery_response",
+                            stream=event.stream_id,
+                            path=path,
+                            address=address,
+                            names=list(names),
+                            server_count=len(names),
+                            payload_len=len(payload),
+                        )
+                        logger.write("bootstrap_checkpoint", stream=event.stream_id, path=path, checkpoint="server_discovery_response")
                     response_body, compressed, wire_payload_len = grpc_response_body(payload, stream["headers"])
                     response_headers = [
                         (":status", "200"),
@@ -3582,6 +3744,13 @@ def main():
         customization_scalar_only=env_flag("SKATE_CUSTOMIZATION_SCALAR_ONLY", False),
         force_synthetic_customization=env_flag("SKATE_FORCE_SYNTHETIC_CUSTOMIZATION_SAVE", True),
         ignore_learned_customization=env_flag("SKATE_IGNORE_LEARNED_CUSTOMIZATION_SAVE", False),
+        cosmetic_mode=os.environ.get("SKATE_COSMETIC_MODE", ""),
+        cosmetic_max_count=env_int("SKATE_COSMETIC_MAX_COUNT", 0),
+        inventory_mode=os.environ.get("SKATE_INVENTORY_MODE", ""),
+        data_chunks_mode=os.environ.get("SKATE_DATA_CHUNKS_MODE", ""),
+        manifest_ownable_asset_chunk_id=os.environ.get("SKATE_MANIFEST_OWNABLE_ASSET_CHUNK_ID", ""),
+        customization_inventory_static_chunk=env_flag("SKATE_CUSTOMIZATION_INVENTORY_STATIC_CHUNK", False),
+        customization_static_as_ownable=env_flag("SKATE_CUSTOMIZATION_STATIC_AS_OWNABLE", False),
     )
     stop_event = threading.Event()
     thread = threading.Thread(target=serve, args=(stop_event, logger, address, names, tls_context), daemon=True)
