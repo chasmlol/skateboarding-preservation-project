@@ -1,0 +1,5 @@
+logs/
+__pycache__/
+*.pyc
+local_backend_pids.json
+preservation_client.exe
