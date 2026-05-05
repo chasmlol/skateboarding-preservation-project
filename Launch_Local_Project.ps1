@@ -10,6 +10,9 @@ if (-not (Test-Path -LiteralPath $Python)) {
     $Python = "python"
 }
 
+$ExpectedSourceHash = "066FD6F38C1CD8F7656BA99016A18CEEB7B9E4EEA81AEB2CDE4C6D5431123703"
+$ExpectedClientHash = "3735610743A2AAA8557D68286788F0CB4425684D3C959374C1F3B2A579CB884C"
+
 $env:PYTHONPATH = Join-Path $Root "vendor"
 
 $env:SKATE_DATA_CHUNKS_MODE = "requested"
@@ -38,6 +41,188 @@ $env:SKATE_PRESENTABLES_OWNABLE_MANIFEST = "0"
 $env:SKATE_DATA_CHUNKS_APPEND_PRESENTABLES_OWNABLES = "0"
 $env:SKATE_SPOOF_SKATER_CATEGORY_AS_BOARD = "0"
 
+function Write-Diag {
+    param(
+        [string]$Message
+    )
+
+    $Now = Get-Date -Format "HH:mm:ss"
+    Write-Host "[$Now] $Message"
+}
+
+function Test-IsAdministrator {
+    $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
+    return $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-FileSha256 {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+}
+
+function Get-ProcessNameForId {
+    param(
+        [int]$ProcessId
+    )
+
+    try {
+        return (Get-Process -Id $ProcessId -ErrorAction Stop).ProcessName
+    }
+    catch {
+        return "unknown"
+    }
+}
+
+function Write-PortDiagnostics {
+    param(
+        [string]$Label,
+        [int[]]$Ports
+    )
+
+    Write-Diag "$Label port listeners:"
+    foreach ($Port in $Ports) {
+        try {
+            $Connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop)
+        }
+        catch {
+            $Connections = @()
+        }
+
+        if ($Connections.Count -eq 0) {
+            Write-Host "  port ${Port}: no listener"
+            continue
+        }
+
+        $Owners = $Connections | ForEach-Object {
+            "$($_.OwningProcess)/$(Get-ProcessNameForId $_.OwningProcess)"
+        } | Sort-Object -Unique
+        Write-Host "  port ${Port}: $($Owners -join ', ')"
+    }
+}
+
+function Write-ExecutableDiagnostics {
+    $ClientExe = Join-Path $Root "preservation_client.exe"
+    $ClientHash = Get-FileSha256 $ClientExe
+
+    if ($ClientHash) {
+        $ClientState = if ($ClientHash -eq $ExpectedClientHash) { "valid" } else { "unexpected" }
+        Write-Diag "Existing preservation client: $ClientState ($($ClientHash.Substring(0, 12))...)"
+    }
+    else {
+        Write-Diag "Existing preservation client: missing"
+    }
+
+    $Candidates = @(Get-ChildItem -LiteralPath $Root -Filter "*.exe" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "preservation_client.exe" })
+    Write-Diag "Local executable candidates found: $($Candidates.Count)"
+
+    $Supported = @()
+    foreach ($Candidate in $Candidates) {
+        $Hash = Get-FileSha256 $Candidate.FullName
+        if ($Hash -eq $ExpectedSourceHash) {
+            $Supported += $Candidate.Name
+        }
+    }
+
+    if ($Supported.Count -gt 0) {
+        Write-Diag "Supported source executable detected: yes ($($Supported -join ', '))"
+    }
+    else {
+        Write-Diag "Supported source executable detected: no"
+    }
+}
+
+function Get-RunLogText {
+    param(
+        [string]$Stamp
+    )
+
+    $Text = ""
+    $Files = @(Get-ChildItem -LiteralPath $LogDir -Filter "*_$Stamp.jsonl" -File -ErrorAction SilentlyContinue)
+    foreach ($File in $Files) {
+        try {
+            $Text += "`n" + (Get-Content -LiteralPath $File.FullName -Raw -ErrorAction Stop)
+        }
+        catch {
+        }
+    }
+    return $Text
+}
+
+function Count-Text {
+    param(
+        [string]$Text,
+        [string]$Pattern
+    )
+
+    return ([regex]::Matches($Text, [regex]::Escape($Pattern))).Count
+}
+
+function Get-FirstRegexGroup {
+    param(
+        [string]$Text,
+        [string]$Pattern
+    )
+
+    $Match = [regex]::Match($Text, $Pattern)
+    if ($Match.Success) {
+        return $Match.Groups[1].Value
+    }
+    return "?"
+}
+
+function Get-RunSummary {
+    param(
+        [string]$Stamp
+    )
+
+    $Text = Get-RunLogText $Stamp
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return "no log lines yet"
+    }
+
+    $GameData = Count-Text $Text "/amp.services.data.game.v1.GameData/getData"
+    $Inventory = Count-Text $Text "/amp.services.inventory.Inventory/getAllInventoryItems"
+    $Ownables = Count-Text $Text "/dingo.services.ownable.game.v1.Ownable/getOwnableInstances"
+    $LevelRewards = Count-Text $Text "/amp.services.level_rewards.v1.game.LevelRewards/getUserLevels"
+    $SaveLoad = Count-Text $Text "/dingo.services.save.game.v1.Save/load"
+    $ProfileSave = Count-Text $Text '"key": "Profile"'
+    $CustomizationSave = Count-Text $Text '"key": "Customization"'
+    $DataChunks = (Count-Text $Text "/amp.services.data.game.v1.GameData/getDataChunks") + (Count-Text $Text "/amp.services.data.game.v1.GameData/getDataChunk")
+
+    $Level = Get-FirstRegexGroup $Text '"event": "level_rewards_response".*?"level": ([0-9.]+)'
+    $InventoryCount = Get-FirstRegexGroup $Text '"event": "inventory_response".*?"count": ([0-9]+)'
+    $OwnableCount = Get-FirstRegexGroup $Text '"event": "ownables_response".*?"count": ([0-9]+)'
+    $ActiveUnlocks = Get-FirstRegexGroup $Text '"customization_active_unlock_count": ([0-9]+)'
+
+    return "GameData=$GameData Inventory=$Inventory(count=$InventoryCount) Ownables=$Ownables(count=$OwnableCount) LevelRewards=$LevelRewards(level=$Level) SaveLoad=$SaveLoad Profile=$ProfileSave Customization=$CustomizationSave(active=$ActiveUnlocks) DataChunks=$DataChunks"
+}
+
+function Write-CurrentRunLogList {
+    param(
+        [string]$Stamp
+    )
+
+    Write-Diag "Current run log files:"
+    $Files = @(Get-ChildItem -LiteralPath $LogDir -Filter "*_$Stamp.*" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($Files.Count -eq 0) {
+        Write-Host "  none"
+        return
+    }
+
+    foreach ($File in $Files) {
+        Write-Host "  $($File.Name) ($($File.Length) bytes)"
+    }
+}
+
 function Start-Backend {
     param(
         [string]$Name,
@@ -65,6 +250,16 @@ $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $Processes = @()
 
 try {
+    Write-Diag "Diagnostics stamp: $Stamp"
+    Write-Diag "Project folder: $Root"
+    Write-Diag "Running as administrator: $(Test-IsAdministrator)"
+    Write-Diag "PowerShell: $($PSVersionTable.PSVersion)"
+    Write-Diag "Python path: $Python"
+    Write-Diag "PYTHONPATH: $($env:PYTHONPATH)"
+    Write-Diag "Cosmetic max count: $($env:SKATE_COSMETIC_MAX_COUNT)"
+    Write-ExecutableDiagnostics
+    Write-PortDiagnostics "Before backend start" @(80, 443, 42230, 44325, 50051)
+
     $Processes += Start-Backend "port80" @(
         "mock_dingo_probe.py",
         "--server-only",
@@ -105,6 +300,8 @@ try {
 
     Start-Sleep -Seconds 2
     Assert-BackendRunning $Processes
+    Write-Diag "Backend process ids: $((($Processes | ForEach-Object { $_.Id }) -join ', '))"
+    Write-PortDiagnostics "After backend start" @(80, 443, 42230, 44325, 50051)
 
     $ClientExe = Join-Path $Root "preservation_client.exe"
     $Patcher = Join-Path $Root "Create_Local_Backend_Exe.py"
@@ -120,16 +317,37 @@ try {
     if (-not (Test-Path -LiteralPath $ClientExe)) {
         throw "No supported local executable was found or generated."
     }
+    Write-ExecutableDiagnostics
 
     Write-Host "Local backend started. Launching preservation client..."
     $ClientStartedAt = Get-Date
-    $Client = Start-Process -FilePath $ClientExe -ArgumentList @("-DingoOnline.ClientAutoLoginEnabled", "true") -WorkingDirectory $Root -PassThru
-    $Client.WaitForExit()
+    $ClientStdout = Join-Path $LogDir "client_$Stamp.stdout.log"
+    $ClientStderr = Join-Path $LogDir "client_$Stamp.stderr.log"
+    $Client = Start-Process -FilePath $ClientExe -ArgumentList @("-DingoOnline.ClientAutoLoginEnabled", "true") -WorkingDirectory $Root -PassThru -RedirectStandardOutput $ClientStdout -RedirectStandardError $ClientStderr
+    Write-Diag "Client process id: $($Client.Id)"
+    Write-Diag "Live backend summary will update every 5 seconds."
+
+    $LastSummary = ""
+    while (-not $Client.HasExited) {
+        Start-Sleep -Seconds 5
+        $Summary = Get-RunSummary $Stamp
+        if ($Summary -ne $LastSummary) {
+            Write-Diag "Backend summary: $Summary"
+            $LastSummary = $Summary
+        }
+    }
+
     $ClientRuntime = ((Get-Date) - $ClientStartedAt).TotalSeconds
+    $FinalSummary = Get-RunSummary $Stamp
+    Write-Diag "Final backend summary: $FinalSummary"
+    Write-CurrentRunLogList $Stamp
 
     if (($Client.ExitCode -ne 0) -or ($ClientRuntime -lt 10)) {
         Write-Host "Preservation client exited with code $($Client.ExitCode) after $([Math]::Round($ClientRuntime, 1)) seconds."
         Write-Host "If the game window did not open, send the newest files from the logs folder."
+    }
+    else {
+        Write-Diag "Preservation client exited with code $($Client.ExitCode) after $([Math]::Round($ClientRuntime, 1)) seconds."
     }
 }
 finally {
