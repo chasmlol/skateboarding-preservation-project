@@ -27,24 +27,39 @@ LOG_PATH = ROOT / "last_rpc_log.jsonl"
 SAVE_SEED_VALUES_PATH = ROOT / "save_seed_values.json"
 SAVE_LEARNED_VALUES_PATH = ROOT / "save_learned_values.json"
 PROGRESSION_VALUES_PATH = ROOT / "progression_learned_values.json"
-EXE = Path(r"C:\skate\Skate 823\Skate\Skate.8-23.dingo-local-http-test.exe")
+EXE = ROOT / "preservation_client.exe"
 HOST = "127.0.0.1"
 PORT = 50051
 TLS_CERT = ROOT / "local_gos_server_chain.pem"
 TLS_KEY = ROOT / "local_gos_server_key.pem"
 LOCALAPPDATA = Path(os.environ.get("LOCALAPPDATA", ""))
+REFERENCE_CACHE_ROOT = Path(
+    os.environ.get("SKATE_REFERENCE_CACHE_ROOT", str(ROOT / "reference_cache" / "http" / "0"))
+)
 CACHE_ROOTS = [
     LOCALAPPDATA / "Skate" / "data" / "cache" / "http" / "0" / "3768241699",
     ROOT / "cache" / "http" / "0" / "3768241699",
 ]
+
+
+def local_cache_file(name, cache_bucket="3768241699"):
+    if LOCALAPPDATA:
+        return LOCALAPPDATA / "Skate" / "data" / "cache" / "http" / "0" / cache_bucket / name
+    return ROOT / "cache" / "http" / "0" / cache_bucket / name
+
+
+def reference_cache_file(cache_bucket, name):
+    return REFERENCE_CACHE_ROOT / cache_bucket / name
+
+
 SMALL_BOARD_DATA_CHUNKS = (
     (
         "6fb1c60f12b12be533c61ea8919989a42d1542a3",
-        Path(r"C:\Users\Daddy\Documents\SkateCPT\data\cache\http\0\3768215040\000000000000000b.cache"),
+        reference_cache_file("3768215040", "000000000000000b.cache"),
     ),
     (
         "6f10a8cfc6f8e028b6ac1dbf86e2167409953d9d",
-        Path(r"C:\Users\Daddy\Documents\SkateCPT\data\cache\http\0\3768215040\0000000000000034.cache"),
+        reference_cache_file("3768215040", "0000000000000034.cache"),
     ),
 )
 SYNTHETIC_STORE_PRICE_CHUNK_ID = "b442780aeaa4e53d72b3a970cce04cc87cb39f19"
@@ -54,14 +69,14 @@ SYNTHETIC_STORE_INVENTORY_CHUNK_ID = "68db11016f38d0ae8e202f2ad1d72219e2d200a2"
 CUSTOMIZATION_INVENTORY_STATIC_CHUNK_ID = "1db14f7dba1f130d9470982116c025c8b73092dc"
 CUSTOMIZATION_PRESENTABLES_STATIC_CHUNK_ID = "20f5d425f5a7d59a13f84d785ae9163b6a821e46"
 CUSTOMIZATION_CATEGORY_SPOOF_CHUNK_ID = "7fae0ad05f6d7e5a2730d21a33c458f12d52b71c"
-SYNTHETIC_STORE_PRICE_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\0000000000000006.cache")
-SYNTHETIC_STORE_CATEGORY_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\000000000000000e.cache")
+SYNTHETIC_STORE_PRICE_SOURCE = local_cache_file("0000000000000006.cache")
+SYNTHETIC_STORE_CATEGORY_SOURCE = local_cache_file("000000000000000e.cache")
 SYNTHETIC_STORE_CATEGORY_EXTRA_SOURCES = (
-    Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\0000000000000036.cache"),
-    Path(r"C:\Users\Daddy\Documents\SkateCPT\data\cache\http\0\3768215040\000000000000002a.cache"),
+    local_cache_file("0000000000000036.cache"),
+    reference_cache_file("3768215040", "000000000000002a.cache"),
 )
-SYNTHETIC_STORE_PREFAB_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\000000000000004e.cache")
-SYNTHETIC_STORE_INVENTORY_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\000000000000000a.cache")
+SYNTHETIC_STORE_PREFAB_SOURCE = local_cache_file("000000000000004e.cache")
+SYNTHETIC_STORE_INVENTORY_SOURCE = local_cache_file("000000000000000a.cache")
 SYNTHETIC_STORE_PRICE_RECORD_IDS = (
     "category_alacarte_tops__item_collector_top_adidas_hoodie_gonzPrice",
 )
@@ -152,8 +167,8 @@ UNLOCKS_DATA_SYSTEM = "unlocks_v1"
 UNLOCKS_DATA_TYPE = "dingo.data.game.unlocks.v1.Unlock"
 PRESENTABLES_OWNABLE_SYSTEM = "presentables"
 PRESENTABLES_OWNABLE_TYPE = "amp.presentables.common.containers.ownable.v1.PresentablesContainerOwnables"
-BOARD_RECORD_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\0000000000000002.cache")
-PRESENTABLES_OWNABLE_SOURCE = Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\000000000000004d.cache")
+BOARD_RECORD_SOURCE = local_cache_file("0000000000000002.cache")
+PRESENTABLES_OWNABLE_SOURCE = local_cache_file("000000000000004d.cache")
 BOARD_RECORD_OWNABLE_IDS = (
     "Own_DeckGraphic_Gen_Popsicle_00001",
     "Own_Truck_Gen_Default_00002",
@@ -2020,8 +2035,9 @@ def local_dingo_settings_config():
     # setting records, not as JSON. Start from a known-good cached config and
     # append local overrides for the pieces our emulator needs.
     cache_candidates = [
-        Path(r"C:\Users\Daddy\AppData\Local\Skate\data\cache\http\0\3768241699\0000000000000013.cache"),
-        Path(r"C:\Users\Daddy\AppData\Local\Skate.backup_before_823_20260503_162800\data\cache\http\0\3768241699\0000000000000013.cache"),
+        local_cache_file("0000000000000013.cache"),
+        ROOT / "cache" / "http" / "0" / "3768241699" / "0000000000000013.cache",
+        reference_cache_file("3768241699", "0000000000000013.cache"),
     ]
     body = b""
     for candidate in cache_candidates:
