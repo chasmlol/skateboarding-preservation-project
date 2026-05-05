@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+PYTHON="$ROOT/python/python.exe"
+
+if [ ! -x "$PYTHON" ]; then
+  PYTHON="python"
+fi
+
+"$PYTHON" "$ROOT/scripts/check_no_game_content.py"
