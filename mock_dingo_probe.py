@@ -881,6 +881,33 @@ def data_app_chunks_from_cache():
         return CACHE_DATA_APP_CHUNKS
 
 
+def manifest_chunk_priority(chunk):
+    chunk_id, chunk_source = chunk
+    try:
+        body = chunk_body_bytes(chunk_source)
+    except OSError:
+        return (50, chunk_id)
+    record_ids = cache_record_ids(body, limit=64)
+    record_text = " ".join(record_ids)
+    if any(record_id.startswith("category_") for record_id in record_ids):
+        return (0, chunk_id)
+    if any(token in record_text for token in ("board_", "cust_", "skater", "sorting_hat")):
+        return (1, chunk_id)
+    if any(token in record_text for token in ("entitlement", "level-", "progression", "unlock", "drop-table")):
+        return (20, chunk_id)
+    return (10, chunk_id)
+
+
+def stable_manifest_chunks(chunks):
+    if not env_flag("SKATE_STABLE_LOCAL_CACHE_MANIFEST", True):
+        return tuple(chunks)
+    ordered = sorted(chunks, key=manifest_chunk_priority)
+    max_chunks = env_int("SKATE_LOCAL_CACHE_MANIFEST_MAX_CHUNKS", 128)
+    if max_chunks > 0:
+        ordered = ordered[:max_chunks]
+    return tuple(ordered)
+
+
 def length_prefixed_cache_records(raw):
     offset = 0
     while offset < len(raw):
@@ -1397,7 +1424,7 @@ def customization_inventory_static_chunks():
 
 
 def board_data_chunks_for_response():
-    chunks = data_app_chunks_from_cache()
+    chunks = stable_manifest_chunks(data_app_chunks_from_cache())
     category_spoof_chunks = customization_category_spoof_chunks()
     if category_spoof_chunks:
         filtered_chunks = []
@@ -3749,6 +3776,8 @@ def main():
         inventory_mode=os.environ.get("SKATE_INVENTORY_MODE", ""),
         data_chunks_mode=os.environ.get("SKATE_DATA_CHUNKS_MODE", ""),
         manifest_ownable_asset_chunk_id=os.environ.get("SKATE_MANIFEST_OWNABLE_ASSET_CHUNK_ID", ""),
+        stable_local_cache_manifest=env_flag("SKATE_STABLE_LOCAL_CACHE_MANIFEST", True),
+        local_cache_manifest_max_chunks=env_int("SKATE_LOCAL_CACHE_MANIFEST_MAX_CHUNKS", 128),
         customization_inventory_static_chunk=env_flag("SKATE_CUSTOMIZATION_INVENTORY_STATIC_CHUNK", False),
         customization_static_as_ownable=env_flag("SKATE_CUSTOMIZATION_STATIC_AS_OWNABLE", False),
     )
