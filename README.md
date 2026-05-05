@@ -27,3 +27,13 @@ Custom park files go in `custom_parks`.
 The filename is the code you enter in-game. For example, the included `custom_parks/parklol` file uses code `parklol`.
 
 Supported filename styles include no extension, `.txt`, `.json`, `.dmop`, and `.park`.
+
+To load a custom park:
+
+1. Use the map to fast travel into a private park.
+2. Open `Create`.
+3. Open `My Parks`.
+4. Select `Enter Park Code`.
+5. Enter the filename code, such as `parklol`.
+
+After the park loads, you can choose `Save Park as New` from `My Parks` to save it locally. Once it is saved locally, it appears in the park list and you do not need to enter the code every time.
