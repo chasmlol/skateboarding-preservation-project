@@ -49,6 +49,18 @@ function Start-Backend {
     return Start-Process -FilePath $Python -ArgumentList $Arguments -WorkingDirectory $Root -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 }
 
+function Assert-BackendRunning {
+    param(
+        [System.Diagnostics.Process[]]$Processes
+    )
+
+    foreach ($Process in $Processes) {
+        if ($Process.HasExited) {
+            throw "A backend process exited early. Check the latest files in logs."
+        }
+    }
+}
+
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $Processes = @()
 
@@ -92,10 +104,12 @@ try {
     $Processes | Select-Object Id, ProcessName, StartTime | ConvertTo-Json | Set-Content -LiteralPath $PidFile -Encoding UTF8
 
     Start-Sleep -Seconds 2
+    Assert-BackendRunning $Processes
 
     $ClientExe = Join-Path $Root "preservation_client.exe"
     $Patcher = Join-Path $Root "Create_Local_Backend_Exe.py"
-    if ((-not (Test-Path -LiteralPath $ClientExe)) -and (Test-Path -LiteralPath $Patcher)) {
+
+    if (Test-Path -LiteralPath $Patcher) {
         Write-Host "Preparing preservation client..."
         & $Python $Patcher
         if ($LASTEXITCODE -ne 0) {
@@ -108,8 +122,15 @@ try {
     }
 
     Write-Host "Local backend started. Launching preservation client..."
+    $ClientStartedAt = Get-Date
     $Client = Start-Process -FilePath $ClientExe -ArgumentList @("-DingoOnline.ClientAutoLoginEnabled", "true") -WorkingDirectory $Root -PassThru
     $Client.WaitForExit()
+    $ClientRuntime = ((Get-Date) - $ClientStartedAt).TotalSeconds
+
+    if (($Client.ExitCode -ne 0) -or ($ClientRuntime -lt 10)) {
+        Write-Host "Preservation client exited with code $($Client.ExitCode) after $([Math]::Round($ClientRuntime, 1)) seconds."
+        Write-Host "If the game window did not open, send the newest files from the logs folder."
+    }
 }
 finally {
     foreach ($Process in $Processes) {
