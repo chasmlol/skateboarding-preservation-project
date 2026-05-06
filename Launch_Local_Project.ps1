@@ -110,6 +110,79 @@ function Write-PortDiagnostics {
     }
 }
 
+function Get-CacheRootSummary {
+    param(
+        [string]$Path,
+        [string[]]$RequiredFiles
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [pscustomobject]@{
+            Path = $Path
+            Exists = $false
+            FileCount = 0
+            Bytes = 0
+            MissingRequired = $RequiredFiles
+            Ready = $false
+        }
+    }
+
+    $Files = @(Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue)
+    $Missing = @()
+    foreach ($Required in $RequiredFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Path $Required))) {
+            $Missing += $Required
+        }
+    }
+
+    return [pscustomobject]@{
+        Path = $Path
+        Exists = $true
+        FileCount = $Files.Count
+        Bytes = ($Files | Measure-Object Length -Sum).Sum
+        MissingRequired = $Missing
+        Ready = ($Missing.Count -eq 0)
+    }
+}
+
+function Write-CacheDiagnostics {
+    $PrimaryRequired = @(
+        "index.0",
+        "0000000000000002.cache",
+        "000000000000000a.cache",
+        "0000000000000013.cache",
+        "000000000000004d.cache"
+    )
+    $ReferenceRequired = @(
+        "000000000000000b.cache",
+        "0000000000000034.cache"
+    )
+
+    $ProjectPrimary = Join-Path $Root "cache\http\0\3768241699"
+    $AppDataPrimary = Join-Path $env:LOCALAPPDATA "Skate\data\cache\http\0\3768241699"
+    $ProjectReference = Join-Path $Root "reference_cache\http\0\3768215040"
+
+    $PrimarySummaries = @(
+        Get-CacheRootSummary $ProjectPrimary $PrimaryRequired
+        Get-CacheRootSummary $AppDataPrimary $PrimaryRequired
+    )
+    $ReferenceSummary = Get-CacheRootSummary $ProjectReference $ReferenceRequired
+    $PrimaryReady = @($PrimarySummaries | Where-Object { $_.Ready }).Count -gt 0
+
+    Write-Diag "Static cache diagnostics:"
+    foreach ($Summary in $PrimarySummaries) {
+        $MissingText = if ($Summary.MissingRequired.Count) { $Summary.MissingRequired -join "," } else { "none" }
+        Write-Host "  primary $($Summary.Path): ready=$($Summary.Ready) files=$($Summary.FileCount) bytes=$($Summary.Bytes) missing=$MissingText"
+    }
+    $ReferenceMissingText = if ($ReferenceSummary.MissingRequired.Count) { $ReferenceSummary.MissingRequired -join "," } else { "none" }
+    Write-Host "  reference $($ReferenceSummary.Path): ready=$($ReferenceSummary.Ready) files=$($ReferenceSummary.FileCount) bytes=$($ReferenceSummary.Bytes) missing=$ReferenceMissingText"
+
+    if (-not $PrimaryReady) {
+        Write-Warning "No complete static cache was found. The game can still boot, but cosmetics/inventory cards may be empty because GameData has no static catalog chunks."
+        Write-Warning "Keep any recovered cache outside git, for example cache\http\0\3768241699 next to this launcher."
+    }
+}
+
 function Write-ExecutableDiagnostics {
     $ClientExe = Join-Path $Root "preservation_client.exe"
     $ClientHash = Get-FileSha256 $ClientExe
@@ -293,6 +366,7 @@ try {
     Write-Diag "PYTHONPATH: $($env:PYTHONPATH)"
     Write-Diag "Cosmetic max count: $($env:SKATE_COSMETIC_MAX_COUNT)"
     Write-ExecutableDiagnostics
+    Write-CacheDiagnostics
     Write-PortDiagnostics "Before backend start" @(80, 443, 42230, 44325, 50051)
 
     $Processes += Start-Backend "port80" @(

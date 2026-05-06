@@ -4,6 +4,12 @@ __pycache__/
 local_backend_pids.json
 preservation_client.exe
 
+# Local cache artifacts recovered from a user's install. These are required for
+# full static catalog/cosmetic data, but they are not redistributable repo
+# source and must stay local.
+cache/
+reference_cache/
+
 # Local workspace folders. Keep the actual client/game install beside this
 # repository, not inside it.
 Skate/

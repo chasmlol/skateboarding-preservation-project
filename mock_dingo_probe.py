@@ -45,19 +45,70 @@ REFERENCE_CACHE_ROOT = Path(
     os.environ.get("SKATE_REFERENCE_CACHE_ROOT", str(ROOT / "reference_cache" / "http" / "0"))
 )
 CACHE_ROOTS = [
-    LOCALAPPDATA / "Skate" / "data" / "cache" / "http" / "0" / "3768241699",
     ROOT / "cache" / "http" / "0" / "3768241699",
+    LOCALAPPDATA / "Skate" / "data" / "cache" / "http" / "0" / "3768241699",
 ]
 
 
 def local_cache_file(name, cache_bucket="3768241699"):
+    project_cache = ROOT / "cache" / "http" / "0" / cache_bucket / name
+    if project_cache.exists():
+        return project_cache
     if LOCALAPPDATA:
         return LOCALAPPDATA / "Skate" / "data" / "cache" / "http" / "0" / cache_bucket / name
-    return ROOT / "cache" / "http" / "0" / cache_bucket / name
+    return project_cache
 
 
 def reference_cache_file(cache_bucket, name):
     return REFERENCE_CACHE_ROOT / cache_bucket / name
+
+
+PRIMARY_CACHE_REQUIRED_FILES = (
+    "index.0",
+    "0000000000000002.cache",
+    "000000000000000a.cache",
+    "0000000000000013.cache",
+    "000000000000004d.cache",
+)
+REFERENCE_CACHE_REQUIRED_FILES = (
+    "000000000000000b.cache",
+    "0000000000000034.cache",
+)
+
+
+def cache_root_summary(root, required_files):
+    files = []
+    byte_count = 0
+    if root.exists():
+        for cache_file in root.glob("*"):
+            if not cache_file.is_file():
+                continue
+            files.append(cache_file)
+            try:
+                byte_count += cache_file.stat().st_size
+            except OSError:
+                pass
+    missing = [name for name in required_files if not (root / name).exists()]
+    return {
+        "path": str(root),
+        "exists": root.exists(),
+        "file_count": len(files),
+        "byte_count": byte_count,
+        "missing_required": missing,
+        "ready": root.exists() and not missing,
+    }
+
+
+def cache_diagnostics():
+    primary_roots = [cache_root_summary(root, PRIMARY_CACHE_REQUIRED_FILES) for root in CACHE_ROOTS]
+    reference_root = REFERENCE_CACHE_ROOT / "3768215040"
+    reference = cache_root_summary(reference_root, REFERENCE_CACHE_REQUIRED_FILES)
+    return {
+        "primary_ready": any(root["ready"] for root in primary_roots),
+        "reference_ready": reference["ready"],
+        "primary_roots": primary_roots,
+        "reference_root": reference,
+    }
 
 
 SMALL_BOARD_DATA_CHUNKS = (
@@ -4003,6 +4054,7 @@ def main():
     address = ns.address or ADDRESS_MODES[ns.address_mode](HOST, PORT)
     names = VERBOSE_SERVER_NAMES if ns.names == "verbose" else DEFAULT_SERVER_NAMES
     tls_context = make_tls_context(Path(ns.tls_cert), Path(ns.tls_key)) if ns.tls_auto else None
+    cache_status = cache_diagnostics()
     logger.write(
         "config",
         address=address,
@@ -4023,7 +4075,23 @@ def main():
         local_cache_manifest_max_chunks=env_int("SKATE_LOCAL_CACHE_MANIFEST_MAX_CHUNKS", 128),
         customization_inventory_static_chunk=env_flag("SKATE_CUSTOMIZATION_INVENTORY_STATIC_CHUNK", False),
         customization_static_as_ownable=env_flag("SKATE_CUSTOMIZATION_STATIC_AS_OWNABLE", False),
+        cache_primary_ready=cache_status["primary_ready"],
+        cache_reference_ready=cache_status["reference_ready"],
+        cache_primary_roots=cache_status["primary_roots"],
+        cache_reference_root=cache_status["reference_root"],
     )
+    if not cache_status["primary_ready"]:
+        logger.write(
+            "cache_warning",
+            message="No complete static cache root found. GameData will be empty and cosmetics/inventory cards may not populate.",
+            cache_primary_roots=cache_status["primary_roots"],
+        )
+    if not cache_status["reference_ready"]:
+        logger.write(
+            "cache_warning",
+            message="Reference cache is incomplete. Fallback static chunks for cosmetics/store data may be missing.",
+            cache_reference_root=cache_status["reference_root"],
+        )
     stop_event = threading.Event()
     thread = threading.Thread(target=serve, args=(stop_event, logger, address, names, tls_context), daemon=True)
     thread.start()

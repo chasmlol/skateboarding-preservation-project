@@ -16,9 +16,29 @@ Run `RUN_PRESERVATION_PROJECT.bat`.
 
 - No original game assets are included.
 - No original executable is included.
+- Static cache folders are local-only and ignored by git.
 - Runtime logs are written to `logs`.
 - Ports `80`, `443`, `42230`, `44325`, and `50051` must be available.
 - Binding to ports `80` and `443` may require administrator permissions.
+
+## Local Static Cache
+
+Cosmetics, inventory cards, build-kit categories, and other static catalog data depend on local HTTP cache files from a previously working install. These cache files are not included in this repository.
+
+The launcher checks for a local cache in:
+
+- `cache\http\0\3768241699`
+- `%LOCALAPPDATA%\Skate\data\cache\http\0\3768241699`
+
+If neither cache exists, the game can still boot, but `GameData/getData` will return no static chunks and cosmetics or inventory cards may appear empty.
+
+To make a setup self-contained without committing cache files, import a cache from an existing local install:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Import_Local_Cache.ps1 -Source "C:\path\to\cache\http\0\3768215040"
+```
+
+If no `-Source` is provided, the importer checks the common local Skate cache locations. The generated `cache` and `reference_cache` folders are ignored by git and should stay out of official commits.
 
 ## Custom Parks
 
